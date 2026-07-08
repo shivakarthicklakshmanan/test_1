@@ -1,0 +1,163 @@
+{
+  "name": "techmind-studio",
+  "displayName": "TechMind Studio",
+  "description": "Airgapped technical assistant \u2014 WAT framework (Workflows, Agent, Tools) backed by your vLLM endpoints. Zero external calls.",
+  "version": "1.0.0",
+  "publisher": "internal-airgapped",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "techmind-sidebar",
+          "title": "TechMind",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "techmind-sidebar": [
+        {
+          "id": "techmind.sessions",
+          "name": "Sessions",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "techmind.workflows",
+          "name": "Workflows",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "techmind.tools",
+          "name": "Tools",
+          "icon": "media/icon.svg"
+        },
+        {
+          "id": "techmind.models",
+          "name": "Models",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "techmind.openAgent",
+        "title": "TechMind: Open Agent Panel",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "techmind.runWorkflow",
+        "title": "TechMind: Run Workflow"
+      },
+      {
+        "command": "techmind.attachActiveFile",
+        "title": "TechMind: Attach Active File to Context",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "techmind.attachSelection",
+        "title": "TechMind: Send Selection to Agent",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "techmind.clearContext",
+        "title": "TechMind: Clear Attached Context"
+      },
+      {
+        "command": "techmind.toggleModel",
+        "title": "TechMind: Toggle Model Enabled"
+      },
+      {
+        "command": "techmind.checkEndpoints",
+        "title": "TechMind: Check Endpoint Health"
+      },
+      {
+        "command": "techmind.newSession",
+        "title": "TechMind: New Session"
+      },
+      {
+        "command": "techmind.loadSession",
+        "title": "TechMind: Load Session"
+      },
+      {
+        "command": "techmind.renameSession",
+        "title": "TechMind: Rename Session"
+      },
+      {
+        "command": "techmind.deleteSession",
+        "title": "TechMind: Delete Session"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "techmind.attachSelection",
+          "group": "techmind",
+          "when": "editorHasSelection"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "techmind.checkEndpoints",
+          "when": "view == techmind.models",
+          "group": "navigation"
+        },
+        {
+          "command": "techmind.newSession",
+          "when": "view == techmind.sessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "techmind.renameSession",
+          "when": "view == techmind.sessions && viewItem == 'sessionItem'",
+          "group": "session@1"
+        },
+        {
+          "command": "techmind.deleteSession",
+          "when": "view == techmind.sessions && viewItem == 'sessionItem'",
+          "group": "session@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "TechMind Studio",
+      "properties": {
+        "techmind.baseUrl": {
+          "type": "string",
+          "default": "https://chatbotapi.analytics.idb.gunk.in",
+          "description": "Base URL for the internal vLLM gateway (airgapped). No external calls are ever made."
+        },
+        "techmind.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "description": "Request timeout in milliseconds."
+        },
+        "techmind.guidedMode": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask one clarifying question before producing complex outputs."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "package": "node make-vsix.js",
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.9.3"
+  }
+}

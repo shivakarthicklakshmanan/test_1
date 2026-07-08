@@ -44,10 +44,11 @@ const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const llmRegistry_1 = require("./llmRegistry");
 class AgentPanel {
-    static createOrShow(extensionUri, getEnabledModels) {
+    static createOrShow(extensionUri, getEnabledModels, context, refreshSessionsTree) {
         const column = vscode.ViewColumn.Two;
         if (AgentPanel.currentPanel) {
             AgentPanel.currentPanel.panel.reveal(column);
+            if (context) AgentPanel.currentPanel.setExtensionContext(context, refreshSessionsTree);
             return AgentPanel.currentPanel;
         }
         const panel = vscode.window.createWebviewPanel("techmindAgent", "TechMind Agent", column, {
@@ -55,6 +56,7 @@ class AgentPanel {
             retainContextWhenHidden: true,
         });
         AgentPanel.currentPanel = new AgentPanel(panel, extensionUri, getEnabledModels);
+        if (context) AgentPanel.currentPanel.setExtensionContext(context, refreshSessionsTree);
         return AgentPanel.currentPanel;
     }
     constructor(panel, extensionUri, getEnabledModels) {
@@ -62,6 +64,11 @@ class AgentPanel {
         this.history = [];
         this.attachedFiles = [];
         this.attachedImages = []; // { name, base64, mimeType }
+        // ── Session state ──
+        this.currentSessionId = null;
+        this.currentSessionName = 'New Session';
+        this.extContext = null;
+        this.refreshSessionsTree = () => {};
         this.panel = panel;
         this.extensionUri = extensionUri;
         this.getEnabledModels = getEnabledModels;
@@ -88,9 +95,20 @@ class AgentPanel {
                 case "openFilePicker":
                     await this.attachFileFromPicker();
                     break;
+                case "newSession":
+                    this.newSession();
+                    break;
+                case "renameSession":
+                    await this.promptRenameCurrentSession();
+                    break;
             }
         }, null, this.disposables);
         this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+    }
+    // Called by extension.js after construction to inject context
+    setExtensionContext(context, refreshSessionsTree) {
+        this.extContext = context;
+        this.refreshSessionsTree = refreshSessionsTree || (() => {});
     }
     attachFile(name, content) {
         // Replace if already attached
@@ -100,6 +118,104 @@ class AgentPanel {
             type: "filesUpdated",
             files: this.attachedFiles.map((f) => f.name),
         });
+    }
+    // ── Session helpers ───────────────────────────────────────────────────────
+    generateSessionId() {
+        return 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    }
+    autoNameFromHistory() {
+        // Use first user message (truncated) as session name
+        const firstUser = this.history.find(m => m.role === 'user');
+        if (!firstUser) return 'New Session';
+        const text = typeof firstUser.content === 'string'
+            ? firstUser.content
+            : (firstUser.content[0]?.text || 'New Session');
+        return text.slice(0, 48).replace(/\n/g, ' ').trim() || 'New Session';
+    }
+    getAllSessions() {
+        if (!this.extContext) return [];
+        return this.extContext.globalState.get('techmind.sessions', []);
+    }
+    async saveCurrentSession() {
+        if (!this.extContext || this.history.length === 0) return;
+        const sessions = this.getAllSessions();
+        const now = Date.now();
+        // Auto-name on first save if still default
+        if (this.currentSessionName === 'New Session' && this.history.length >= 2) {
+            this.currentSessionName = this.autoNameFromHistory();
+        }
+        if (this.currentSessionId) {
+            // Update existing
+            const idx = sessions.findIndex(s => s.id === this.currentSessionId);
+            if (idx >= 0) {
+                sessions[idx].history = this.history;
+                sessions[idx].updatedAt = now;
+                sessions[idx].name = this.currentSessionName;
+            } else {
+                // Session was deleted externally — create fresh
+                sessions.push({ id: this.currentSessionId, name: this.currentSessionName, history: this.history, createdAt: now, updatedAt: now });
+            }
+        } else {
+            // First save — create new session
+            this.currentSessionId = this.generateSessionId();
+            sessions.push({ id: this.currentSessionId, name: this.currentSessionName, history: this.history, createdAt: now, updatedAt: now });
+        }
+        await this.extContext.globalState.update('techmind.sessions', sessions);
+        this.refreshSessionsTree();
+        // Update panel header
+        this.postToWebview({ type: 'sessionInfo', name: this.currentSessionName, id: this.currentSessionId });
+    }
+    newSession() {
+        this.history = [];
+        this.attachedFiles = [];
+        this.attachedImages = [];
+        this.currentSessionId = null;
+        this.currentSessionName = 'New Session';
+        this.panel.title = 'TechMind Agent';
+        this.postToWebview({ type: 'sessionNew' });
+    }
+    loadSession(sessionId) {
+        if (!this.extContext) return;
+        const sessions = this.getAllSessions();
+        const session = sessions.find(s => s.id === sessionId);
+        if (!session) { vscode.window.showWarningMessage('Session not found.'); return; }
+        this.history = session.history || [];
+        this.currentSessionId = session.id;
+        this.currentSessionName = session.name;
+        this.attachedFiles = [];
+        this.attachedImages = [];
+        this.panel.title = `TechMind — ${session.name.slice(0, 30)}`;
+        this.postToWebview({ type: 'sessionLoaded', history: this.history, name: session.name, id: session.id });
+    }
+    clearContext() {
+        this.attachedFiles = [];
+        this.attachedImages = [];
+        this.postToWebview({ type: 'contextCleared' });
+    }
+    notifySessionRenamed(sessionId, newName) {
+        if (this.currentSessionId === sessionId) {
+            this.currentSessionName = newName;
+            this.panel.title = `TechMind — ${newName.slice(0, 30)}`;
+            this.postToWebview({ type: 'sessionInfo', name: newName, id: sessionId });
+        }
+    }
+    notifySessionDeleted(sessionId) {
+        if (this.currentSessionId === sessionId) {
+            this.newSession();
+            vscode.window.showInformationMessage('Current session was deleted. Started a new session.');
+        }
+    }
+    async promptRenameCurrentSession() {
+        const newName = await vscode.window.showInputBox({
+            prompt: 'Rename current session',
+            value: this.currentSessionName,
+            placeHolder: 'Session name',
+        });
+        if (!newName || !newName.trim()) return;
+        this.currentSessionName = newName.trim();
+        this.panel.title = `TechMind — ${this.currentSessionName.slice(0, 30)}`;
+        this.postToWebview({ type: 'sessionInfo', name: this.currentSessionName, id: this.currentSessionId });
+        await this.saveCurrentSession();
     }
     async attachFileFromPicker() {
         // Show file picker — supports text, images, PDF, common data files
@@ -251,6 +367,8 @@ class AgentPanel {
         // Store clean turn (without guided-mode wrapper) for memory
         this.history.push({ role: "user", content: userText });
         this.history.push({ role: "assistant", content: result.text });
+        // Auto-save session after every exchange
+        await this.saveCurrentSession();
         this.postToWebview({
             type: "assistantMessage",
             text: result.text,
@@ -340,6 +458,29 @@ class AgentPanel {
     letter-spacing: 0.3px;
   }
   #header .sub { font-weight: 400; opacity: 0.6; font-size: 11px; }
+
+  /* ── Session bar ── */
+  #sessionBar {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 5px 14px;
+    background: var(--tm-code-bg);
+    border-bottom: 1px solid var(--tm-border);
+    font-size: 11px;
+  }
+  #sessionName {
+    font-weight: 600; opacity: 0.85;
+    max-width: 60%; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+    color: var(--tm-accent);
+  }
+  #sessionBtns { display: flex; gap: 5px; }
+  #sessionBtns button {
+    font-size: 10px; padding: 2px 7px;
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    border: none; border-radius: 3px; cursor: pointer;
+  }
+  #sessionBtns button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 
   /* ── Attached bar ── */
   #attachedBar {
@@ -559,6 +700,13 @@ class AgentPanel {
   <div id="header">
     <span>TechMind Agent</span>
     <span class="sub" id="modelSuggestion"></span>
+  </div>
+  <div id="sessionBar">
+    <span id="sessionName">New Session</span>
+    <div id="sessionBtns">
+      <button id="newSessionBtn" title="Start new session">＋ New</button>
+      <button id="renameSessionBtn" title="Rename this session">✎ Rename</button>
+    </div>
   </div>
   <div id="attachedBar"></div>
   <div id="routingBanner"></div>
@@ -787,6 +935,31 @@ class AgentPanel {
   const attachBtn = document.getElementById('attachBtn');
   attachBtn.onclick = () => vscode.postMessage({ type: 'openFilePicker' });
 
+  const newSessionBtn = document.getElementById('newSessionBtn');
+  const renameSessionBtn = document.getElementById('renameSessionBtn');
+  const sessionNameEl = document.getElementById('sessionName');
+
+  newSessionBtn.onclick = () => vscode.postMessage({ type: 'newSession' });
+  renameSessionBtn.onclick = () => vscode.postMessage({ type: 'renameSession' });
+
+  function setSessionName(name) {
+    sessionNameEl.textContent = name || 'New Session';
+  }
+
+  function replayHistory(history) {
+    chat.innerHTML = '';
+    msgCounter = 0;
+    for (let i = 0; i < history.length; i++) {
+      const m = history[i];
+      const role = m.role === 'user' ? 'user' : 'assistant';
+      const content = typeof m.content === 'string' ? m.content : (m.content[0]?.text || '');
+      if (role === 'user' || role === 'assistant') {
+        addMessage(role, content, null);
+      }
+    }
+    chat.scrollTop = chat.scrollHeight;
+  }
+
   sendBtn.onclick = send;
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -827,6 +1000,20 @@ class AgentPanel {
       case 'contextCleared':
         attachedBar.style.display = 'none';
         attachedBar.textContent = '';
+        break;
+      case 'sessionNew':
+        chat.innerHTML = '';
+        msgCounter = 0;
+        setSessionName('New Session');
+        attachedBar.style.display = 'none';
+        break;
+      case 'sessionLoaded':
+        setSessionName(msg.name);
+        replayHistory(msg.history);
+        attachedBar.style.display = 'none';
+        break;
+      case 'sessionInfo':
+        setSessionName(msg.name);
         break;
     }
   });
