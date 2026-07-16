@@ -1,1 +1,15 @@
 
+document.getElementById("exportBtn").addEventListener("click", () => {
+    const temp = document.createElement("canvas");
+    temp.width = canvas.width;
+    temp.height = canvas.height;
+    const tctx = temp.getContext("2d");
+    tctx.fillStyle = "#ffffff";
+    tctx.fillRect(0, 0, temp.width, temp.height);
+    tctx.drawImage(canvas, 0, 0);
+
+    const link = document.createElement("a");
+    link.download = "drawing.png";
+    link.href = temp.toDataURL("image/png");
+    link.click();
+  });
