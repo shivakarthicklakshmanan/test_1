@@ -1,14 +1,6 @@
-import pdfplumber
-import config
-
-with pdfplumber.open(config.CONTACT_LIST_PDF) as pdf:
-    print(f"Pages: {len(pdf.pages)}")
-    for i, page in enumerate(pdf.pages):
-        text = page.extract_text() or ""
-        table = page.extract_table()
-        print(f"\n--- page {i} ---")
-        print(f"extract_text() length: {len(text)}")
-        print(repr(text[:400]))
-        print(f"extract_table() found a table: {table is not None}")
-        if table:
-            print("first 2 rows:", table[:2])
+>>> from pathlib import Path
+>>> import config
+>>> from mapping_loader import load_contact_roster
+>>> roster = load_contact_roster(Path(config.CONTACT_LIST_PDF))
+>>> for c in roster:
+...     print(c)
