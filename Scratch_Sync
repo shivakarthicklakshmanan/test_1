@@ -4,3 +4,12 @@
 >>> roster = load_contact_roster(Path(config.CONTACT_LIST_PDF))
 >>> for c in roster:
 ...     print(c)
+
+
+>>> from navigator import _is_drill_down
+>>> _is_drill_down("Others")          # should print True
+>>> b.click("Others")
+>>> b.url()                           # confirm it actually navigated somewhere
+>>> b.links()                         # see what sub-links live under Others
+>>> b.back()
+>>> b.url()                           # confirm back() actually returns to the tab page
