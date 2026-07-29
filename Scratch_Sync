@@ -156,6 +156,23 @@ def _extract_owner_hints(text: str) -> dict:
     return hints
 
 
+def _get_href_for_label(b, label: str) -> str | None:
+    """
+    Looks up a real, navigable href for a link matching `label` on the
+    CURRENT page (not to be confused with navigator._find_link_href, which
+    is used specifically for the Contact Us PDF flow). Returns None for
+    javascript:/empty/'#' hrefs — those need an actual click (they have no
+    real destination URL to navigate to directly).
+    """
+    label_norm = label.strip().lower()
+    for l in b.links(limit=300):
+        if (l.get("text") or "").strip().lower() == label_norm:
+            href = (l.get("href") or "").strip()
+            if href and not href.lower().startswith("javascript:") and href != "#":
+                return href
+    return None
+
+
 def _page_looks_like_dashboard(page_text: str):
     """
     Content-based check: does this page actually look like a dashboard
@@ -193,10 +210,22 @@ def scrape_dashboard(b: AirgapBrowser, label: str, depth: int = 0,
         visited_urls = set()
 
     try:
-        b.click(label)
+        # Prefer navigating straight to the known href over clicking the
+        # visible element. This matters for hover-only dropdown menus:
+        # their sub-links are real <a href> elements sitting in the DOM
+        # the whole time (querying for href doesn't care about CSS
+        # visibility), but clicking one fails Playwright's "is it visible"
+        # actionability check and retries forever, since it's only shown
+        # on :hover. Falls back to click() for JS-driven links with no
+        # usable static href (e.g. onclick-only navigation).
+        href = _get_href_for_label(b, label)
+        if href:
+            b.navigate(href)
+        else:
+            b.click(label)
         _settle(b, timeout=config.DASHBOARD_LOAD_TIMEOUT_MS)
     except Exception as e:
-        print(f"  [WARN] Could not click '{label}': {e}")
+        print(f"  [WARN] Could not visit '{label}': {e}")
         return results
 
     current_url = b.url()
@@ -451,7 +480,4 @@ def fetch_contact_pdf(b, out_path: Path = None) -> Path:
 
 def _looks_like_pdf_url_hint(url: str) -> bool:
     """Loose pre-filter just to prioritize which link to try downloading
-    first when several are present — actual confirmation is by content,
-    via _looks_like_pdf_bytes, once downloaded."""
-    u = url.lower()
-    return ".pdf" in u or "pdf" in u.split("?")[0].split("/")[-1]
+    first when sever
