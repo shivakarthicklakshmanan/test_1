@@ -1,5 +1,13 @@
-from navigator import list_dashboard_tabs, _detect_chrome_labels
-raw_tabs = list_dashboard_tabs(b)
-print(f"{len(raw_tabs)} raw link(s) found:")
-for t in raw_tabs:
-    print(f"  text={t['text']!r:40s} href={t.get('href')!r}")
+[1/5] Loading team/subject mapping sheet...
+       [PARKED] config.USE_TEAM_MAPPING is False — skipping the mapping sheet entirely for now (Team/Subject/Owner columns in the report will be blank; set it True later to re-enable).
+[2/5] Collecting dashboard pages + contact roster...
+Using channel: chrome
+  [OK] Contact roster fetched directly as PDF: output\contact_us_team_members_latest.pdf
+       103 contact(s) parsed from live-fetched PDF.
+  [INFO] Detected 38 persistent header/nav label(s) (present on both the entry page and 'OTHERS') — these will be excluded on every page visited this run.
+  [INFO] 0 link(s) to visit after excluding Contact Us and the detected header band (50 were on the page before that).
+  [INFO] 0 page(s) kept as real dashboards out of 0 top-level link(s) visited (0 total page visits).
+       0 dashboard page(s) collected, 103 contact(s) in roster.
+[3/5] Parsing refresh info per dashboard...
+[4/5] Reconciling against mapping sheet...
+        [PARKED] config.USE_TEAM_MAPPING is False — skipping reconciliation (Mapping Reconciliation sheet in the report will be empty).
