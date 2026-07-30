@@ -1,36 +1,656 @@
-from navigator import list_dashboard_tabs, _detect_chrome_labels
+"""
+Walks the JSP portal:
 
-print("URL before anything:", b.url())
+    home page --(Confirm)--> tab page --(each tab)--> dashboard page
+                                  |
+                                  +-- "Others" tab --> sub-links --> dashboard page(s)
 
-raw_tabs = list_dashboard_tabs(b)
-print(f"\n{len(raw_tabs)} raw link(s) found (Contact Us already excluded):")
-for t in raw_tabs:
-    print(f"  text={t['text']!r:40s} href={t.get('href')!r}")
+using your existing AirgapBrowser (tools/browser.py) as a library — this
+module never shells out to the CLI, it drives the Playwright page directly
+so we can loop over links, use .back(), and read text between steps.
 
-print("\n--- running _detect_chrome_labels ---")
-chrome = _detect_chrome_labels(b, raw_tabs)
-print("chrome_labels detected:", chrome)
+Every dashboard we visit yields a DashboardScrapeResult: raw text (for the
+refresh_parser), plus whatever owner/team-lead/email/phone we could find
+directly on the page (per your description, many dashboard pages already
+show this).
+"""
 
-print("\nURL after chrome detection:", b.url())
+from __future__ import annotations
+
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import config
+
+def _import_browser():
+    """
+    Lazily imports your existing tools/browser.py as a library. Deferred
+    (rather than a top-of-file import) so that mock-mode testing and the
+    non-browser parts of this package (mapping, parsing, report, mailer)
+    work even on a machine without Playwright/Chrome installed.
+    """
+    _tools_candidates = [Path("./tools"), Path("../tools"), Path("./")]
+    for _p in _tools_candidates:
+        if (_p / "browser.py").exists():
+            sys.path.insert(0, str(_p.resolve()))
+            break
+    from browser import AirgapBrowser, EgressBlocked
+    return AirgapBrowser, EgressBlocked
 
 
+_EMAIL_RE = re.compile(r"[\w.\-+]+@[\w\-]+\.[\w.\-]+")
+_PHONE_RE = re.compile(r"(?:\+?\d{1,3}[\s-]?)?\d{10}\b")
 
-from navigator import list_dashboard_tabs, scrape_dashboard, _normalize_label_for_match
 
-manual_chrome = {_normalize_label_for_match(x) for x in [
-    "Home", "About Us", "Access Management", "Hits", "Journal", "EWS New",
-    "Search", "What's New", "Quick Links", "Feedback", "Contact Us",
-    "Channel Migration and Adoption", "GenAI Chatbots",
-]}
+@dataclass
+class DashboardScrapeResult:
+    label: str
+    url: str
+    page_text: str
+    owner_name: str | None = None
+    team_lead_name: str | None = None
+    emails_found: list[str] = field(default_factory=list)
+    phones_found: list[str] = field(default_factory=list)
+    depth: int = 0
+    parent_label: str | None = None
 
-tabs = list_dashboard_tabs(b, chrome_labels=manual_chrome)
-print(f"{len(tabs)} real tile(s) after manual exclusion:")
-for t in tabs:
-    print(" -", t['text'])
 
-if tabs:
-    first_label = tabs[0]['text']
-    results = scrape_dashboard(b, first_label, chrome_labels=manual_chrome)
-    print(f"\nResults from '{first_label}':")
-    for r in results:
-        print(" -", r.label, "|", r.url)
+def open_browser(headed: bool = False):
+    AirgapBrowser, _ = _import_browser()
+    return AirgapBrowser(
+        headed=headed,
+        allow_any=config.ALLOW_ANY_HOST,
+        profile=config.PORTAL_PROFILE,
+        channel=config.PORTAL_CHANNEL,
+    )
+
+
+def enter_portal(b) -> None:
+    """Landing page -> click Confirm -> land on the tab-listing page."""
+    b.navigate(config.PORTAL_HOME_URL)
+    b.click(config.CONFIRM_BUTTON_TARGET)
+    _settle(b)
+
+
+def _safe(fn, *args, retries: int = 3, wait_s: float = 1.0, **kwargs):
+    """
+    Wraps a call to an AirgapBrowser method that runs page.evaluate()
+    internally (links(), get_text(), find(), read_page()). If the page is
+    still navigating/reloading in the background when called, Playwright
+    raises "Execution context was destroyed" — this retries a few times
+    after a short wait instead of propagating that as a hard failure, since
+    it's a timing race, not a real error about the page itself.
+    """
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            msg = str(e).lower()
+            if "execution context was destroyed" in msg or "context was destroyed" in msg:
+                last_err = e
+                if attempt < retries:
+                    time.sleep(wait_s)
+                continue
+            raise
+    raise last_err
+
+
+def safe_links(b, limit: int = 300) -> list[dict]:
+    return _safe(b.links, limit=limit)
+
+
+def safe_get_text(b, max_chars: int = 20000) -> str:
+    return _safe(b.get_text, max_chars=max_chars)
+
+
+def _normalize_label_for_match(label: str) -> str:
+    """Strips common nav-link noise (icon characters, '(12)'-style
+    badge/count text, extra punctuation, irregular whitespace) before
+    comparing against config.NON_DASHBOARD_LABELS. Deliberately NOT a
+    substring match: a real dashboard could plausibly be named something
+    like "Website Hits Analytics" (containing the word "hits"), and a
+    substring check would wrongly exclude it as nav chrome. This only
+    forgives cosmetic differences, not different/extra words."""
+    cleaned = re.sub(r'\(.*?\)', '', label)          # drop "(12)"-style badges
+    cleaned = re.sub(r'[^A-Za-z\s]', '', cleaned)    # drop icons/punctuation/digits
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip().lower()
+    return cleaned
+
+
+def _is_non_dashboard_label(label: str) -> bool:
+    return _normalize_label_for_match(label) in config.NON_DASHBOARD_LABELS
+
+
+def list_dashboard_tabs(b: AirgapBrowser, chrome_labels: set | None = None) -> list[dict]:
+    """
+    Every link on the current page, except:
+      - Contact Us — fetched separately via fetch_contact_pdf(), so it's
+        skipped here to avoid a redundant re-visit/re-download.
+      - anything in `chrome_labels` — the persistent header/nav band,
+        detected dynamically per-run (see _detect_chrome_labels), NOT a
+        hardcoded name list. Applied on every page visited, not just the
+        entry page, since the header band repeats everywhere.
+    Whether a link is "really" a dashboard is otherwise decided by what's
+    actually on its page (see _page_looks_like_dashboard), not by its label.
+    """
+    chrome_labels = chrome_labels or set()
+    all_links = safe_links(b, limit=300)
+    out = []
+    for l in all_links:
+        label = (l.get("text") or "").strip()
+        if not label:
+            continue
+        norm = _normalize_label_for_match(label)
+        if norm == _normalize_label_for_match(config.CONTACT_US_LABEL):
+            continue
+        if norm in chrome_labels:
+            continue
+        out.append(l)
+    return out
+
+
+_CONTACT_FOOTER_RE = re.compile(
+    r'contact\s+to\s*:?-?\s*(?:[A-Za-z]{1,4}\.?\s+)?'   # "...kindly contact to :- " (+ optional Mr./Ms./Dr. style prefix)
+    r'([A-Za-z][A-Za-z .]{1,40}?)\s*:\s*'                # Name
+    r'Des\.?\s*([^:]{2,60}?)\s*:\s*'                     # Designation
+    r'Ph\.?\s*([\d][\d\s]{5,15}\d)\s*:\s*'                # Phone (loose — real digits vary)
+    r'Mail\.?\s*([\w.\-+]+@[\w.\-]+)',                    # Email
+    re.IGNORECASE,
+)
+
+
+def _extract_owner_hints(text: str) -> dict:
+    hints = {"owner_name": None, "team_lead_name": None,
+             "emails": _EMAIL_RE.findall(text), "phones": _PHONE_RE.findall(text),
+             "designation": None, "contact_phone": None}
+
+    # Real observed footer template: "...kindly contact to :- <Name>: Des.
+    # <Designation>: Ph. <Phone>: Mail. <Email>" — this is the primary
+    # source of the dashboard contact on this portal, so it's checked first.
+    m = _CONTACT_FOOTER_RE.search(text)
+    if m:
+        hints["owner_name"] = m.group(1).strip(" :-")
+        hints["designation"] = m.group(2).strip(" :-")
+        hints["contact_phone"] = re.sub(r"\s+", "", m.group(3))
+        # group(4) email is already covered by hints["emails"], no need to duplicate
+
+    if not hints["owner_name"]:
+        m = re.search(r'(?:Dashboard\s+Owner|Owner)\s*:\s*([A-Za-z][A-Za-z .]{2,60})', text)
+        if m:
+            hints["owner_name"] = m.group(1).strip()
+
+    # Colon is mandatory (not ":?") so a bare word "Lead" inside unrelated
+    # text (e.g. "Lead Conversion As on:", a refresh-date label, not a
+    # person) doesn't get mistaken for "Team Lead: <name>".
+    m = re.search(r'Team\s+Lead\s*:\s*([A-Za-z][A-Za-z .]{2,60})', text)
+    if m:
+        hints["team_lead_name"] = m.group(1).strip()
+
+    return hints
+
+
+def _get_href_for_label(b, label: str) -> str | None:
+    """
+    Looks up a real, navigable href for a link matching `label` on the
+    CURRENT page (not to be confused with navigator._find_link_href, which
+    is used specifically for the Contact Us PDF flow). Returns None for
+    javascript:/empty/'#' hrefs — those need an actual click (they have no
+    real destination URL to navigate to directly).
+    """
+    label_norm = label.strip().lower()
+    for l in safe_links(b, limit=300):
+        if (l.get("text") or "").strip().lower() == label_norm:
+            href = (l.get("href") or "").strip()
+            if href and not href.lower().startswith("javascript:") and href != "#":
+                return href
+    return None
+
+
+def _page_looks_like_dashboard(page_text: str):
+    """
+    Content-based check: does this page actually look like a dashboard
+    (has a title and/or at least one refresh-date field), as opposed to a
+    nav/menu/junk page? Returns (is_dashboard: bool, info: RefreshInfo) —
+    the caller reuses `info` directly instead of re-parsing later.
+    """
+    import refresh_parser
+    info = refresh_parser.parse_page(page_text)
+    is_dashboard = bool(info.title) or any(v is not None for v in info.fields.values())
+    return is_dashboard, info
+
+
+def _visit_link(b, label: str) -> None:
+    """
+    Visits a link by label. Tries click() FIRST — the safe default that
+    stays compatible with links whose real navigation depends on JS side
+    effects (a session token/form submission attached by an onclick
+    handler), which a raw navigate() to the same href can miss and 404 on.
+    Falls back to direct href navigation ONLY if click() itself raises —
+    which is exactly the hover-only-dropdown symptom (Playwright's
+    visibility check fails and retries forever) — so that case still gets
+    fixed without navigate() being tried first for every ordinary link.
+    """
+    try:
+        b.click(label)
+        return
+    except Exception as click_err:
+        href = _get_href_for_label(b, label)
+        if href:
+            print(f"  [INFO] click() failed for '{label}' ({click_err}) — "
+                  f"retrying via direct navigation to its known href instead.")
+            b.navigate(href)
+        else:
+            raise
+
+
+def _detect_chrome_labels(b: AirgapBrowser, entry_tabs: list[dict]) -> set[str]:
+    """
+    Detects the persistent header/nav band WITHOUT any hardcoded names:
+    captures every link label on the entry page, then briefly visits a
+    sample tile to see a different page's links, and intersects the two
+    label sets. Labels present on BOTH pages are treated as the header band
+    — since real dashboard-specific content differs page to page, only a
+    persistent nav band would show up identically on both.
+
+    Samples from the END of the link list first, not the start — a header
+    band sits at the top of the page and is very likely to appear first in
+    link order too, so sampling entry_tabs[0] risks accidentally sampling
+    the header itself. Tries several candidates (falling back toward the
+    front of the list) and only accepts one whose resulting label set is a
+    PROPER subset of the entry page's — i.e. it actually shows different/
+    fewer links, confirming it's real distinct content and not just
+    another header-only page that would make everything look like chrome.
+    Restores the entry page afterward.
+    """
+    entry_url = b.url()
+    entry_labels = {_normalize_label_for_match(l.get("text") or "")
+                     for l in safe_links(b, limit=300) if (l.get("text") or "").strip()}
+
+    if not entry_tabs:
+        print("  [WARN] No tiles found to sample for chrome detection — "
+              "cannot safely distinguish header links from content. "
+              "Proceeding with no chrome exclusion at all.")
+        return set()
+
+    max_attempts = min(5, len(entry_tabs))
+    candidates = list(reversed(entry_tabs))[:max_attempts]  # end of list first
+
+    for candidate in candidates:
+        sample_label = (candidate.get("text") or "").strip()
+        if not sample_label:
+            continue
+        try:
+            _visit_link(b, sample_label)
+            _settle(b, timeout=config.DASHBOARD_LOAD_TIMEOUT_MS)
+            sample_labels = {_normalize_label_for_match(l.get("text") or "")
+                              for l in safe_links(b, limit=300) if (l.get("text") or "").strip()}
+        except Exception as e:
+            print(f"  [INFO] Chrome-detection sample '{sample_label}' failed to load "
+                  f"({e}) — trying a different sample.")
+            sample_labels = None
+        finally:
+            b.navigate(entry_url)
+            _settle(b)
+
+        if sample_labels is None:
+            continue
+
+        chrome = entry_labels & sample_labels
+        if len(chrome) < len(entry_labels):
+            # A real reduction happened — this sample showed genuinely
+            # different content, not just the header again.
+            print(f"  [INFO] Detected {len(chrome)} persistent header/nav label(s) "
+                  f"(present on both the entry page and '{sample_label}') — these "
+                  f"will be excluded on every page visited this run.")
+            return chrome
+        print(f"  [INFO] Sample '{sample_label}' showed no reduction in labels "
+              f"(likely itself a header/chrome item) — trying a different sample.")
+
+    print("  [WARN] Could not confirm the header band from any sampled tile — "
+          "proceeding with no chrome exclusion at all. Header/nav items may "
+          "get incorrectly visited and scraped this run.")
+    return set()
+
+
+def scrape_dashboard(b: AirgapBrowser, label: str, depth: int = 0,
+                      parent_label: str | None = None,
+                      visited_urls: set | None = None,
+                      visit_counter: list | None = None,
+                      chrome_labels: set | None = None) -> list[DashboardScrapeResult]:
+    """
+    Clicks a link by its visible label and decides what to do based on
+    what's actually on the resulting page — NOT based on its label:
+      - looks like a real dashboard (title and/or a refresh field found)
+        -> keep it as a leaf result, don't drill further.
+      - doesn't look like a dashboard, but has further links -> treat it
+        as a menu page and recurse into each of those the same way (this
+        is what used to require a label literally containing "others").
+      - doesn't look like a dashboard and has no further links -> skip it
+        (e.g. "What's New", "Search", "Quick Links" — genuinely nothing
+        to scrape here).
+    `visited_urls` is threaded through recursive/sibling calls so the same
+    URL (reached via two different links, or a menu that loops back on
+    itself) is never scraped twice. `visit_counter` is a hard numeric
+    safety net on top of that — see config.MAX_TOTAL_PAGES_VISITED for why
+    URL-based loop detection alone isn't always enough.
+    Always ends by hitting .back() so the caller's page state is restored.
+    """
+    results: list[DashboardScrapeResult] = []
+    if visited_urls is None:
+        visited_urls = set()
+    if visit_counter is None:
+        visit_counter = [0]
+
+    if visit_counter[0] >= config.MAX_TOTAL_PAGES_VISITED:
+        print(f"  [WARN] Hit MAX_TOTAL_PAGES_VISITED ({config.MAX_TOTAL_PAGES_VISITED}) — "
+              f"stopping the walk here. If this is a false alarm (a genuinely large "
+              f"portal, not a loop), raise this limit in config.py.")
+        return results
+    visit_counter[0] += 1
+
+    try:
+        # click() first — the safe default, compatible with links whose
+        # real navigation depends on JS side effects an onclick handler
+        # attaches (session token, form submission) that a raw navigate()
+        # to the same href can miss and 404 on. Falls back to direct href
+        # navigation only if click() itself fails — which is exactly the
+        # hover-only-dropdown symptom (Playwright's visibility check fails
+        # and retries forever, since the element is only shown on :hover).
+        _visit_link(b, label)
+        _settle(b, timeout=config.DASHBOARD_LOAD_TIMEOUT_MS)
+    except Exception as e:
+        print(f"  [WARN] Could not visit '{label}': {e}")
+        return results
+
+    current_url = b.url()
+    if current_url in visited_urls:
+        print(f"  [INFO] '{label}' -> already visited this page, skipping to avoid a loop.")
+        try:
+            b.back()
+            _settle(b)
+        except Exception as e:
+            print(f"  [WARN] Back navigation issue after '{label}': {e}")
+        return results
+    visited_urls.add(current_url)
+
+    text = safe_get_text(b, max_chars=20000)
+    is_dashboard, info = _page_looks_like_dashboard(text)
+
+    if is_dashboard:
+        hints = _extract_owner_hints(text)
+        results.append(DashboardScrapeResult(
+            label=label,
+            url=current_url,
+            page_text=text,
+            owner_name=hints["owner_name"],
+            team_lead_name=hints["team_lead_name"],
+            emails_found=hints["emails"],
+            phones_found=hints["phones"],
+            depth=depth,
+            parent_label=parent_label,
+        ))
+    elif depth < config.MAX_DRILL_DEPTH:
+        sub_links = list_dashboard_tabs(b, chrome_labels=chrome_labels)
+        if sub_links:
+            print(f"  [INFO] '{label}' has no dashboard content but "
+                  f"{len(sub_links)} further link(s) — drilling in (depth {depth + 1}).")
+            for sl in sub_links:
+                sub_label = (sl.get("text") or "").strip()
+                if not sub_label:
+                    continue
+                results.extend(scrape_dashboard(b, sub_label, depth=depth + 1,
+                                                 parent_label=label, visited_urls=visited_urls,
+                                                 visit_counter=visit_counter,
+                                                 chrome_labels=chrome_labels))
+        else:
+            print(f"  [INFO] '{label}' has no dashboard content and no further "
+                  f"links — skipping (likely a nav/info page, e.g. What's New/Search).")
+    else:
+        print(f"  [INFO] '{label}' has no dashboard content and max drill depth "
+              f"({config.MAX_DRILL_DEPTH}) reached — skipping.")
+
+    try:
+        b.back()
+        _settle(b)
+    except Exception as e:
+        print(f"  [WARN] Back navigation issue after '{label}': {e}")
+
+    return results
+
+
+def scrape_all_dashboards(b: AirgapBrowser) -> list[DashboardScrapeResult]:
+    all_results: list[DashboardScrapeResult] = []
+    visited_urls: set = set()
+    visit_counter: list = [0]
+
+    # Enumerate entry-page links first WITHOUT any chrome filter (nothing
+    # detected yet), sample one to detect the header band dynamically, then
+    # re-enumerate with that band excluded for the real walk.
+    raw_entry_tabs = list_dashboard_tabs(b)
+    chrome_labels = _detect_chrome_labels(b, raw_entry_tabs)
+    tabs = list_dashboard_tabs(b, chrome_labels=chrome_labels)
+
+    print(f"  [INFO] {len(tabs)} link(s) to visit after excluding Contact Us and the "
+          f"detected header band ({len(raw_entry_tabs)} were on the page before that).")
+    for t in tabs:
+        label = (t.get("text") or "").strip()
+        if not label:
+            continue
+        print(f"  [INFO] Visiting: {label}")
+        all_results.extend(scrape_dashboard(b, label, visited_urls=visited_urls,
+                                             visit_counter=visit_counter,
+                                             chrome_labels=chrome_labels))
+    print(f"  [INFO] {len(all_results)} page(s) kept as real dashboards out of "
+          f"{len(tabs)} top-level link(s) visited ({visit_counter[0]} total page visits).")
+    return all_results
+
+
+def _settle(b, timeout: int = 8000):
+    """
+    Wait for the page to actually finish loading/redirecting before reading
+    or clicking on it — click()/navigate() can return before a slow
+    multi-hop redirect chain finishes, which is what caused get_text() to
+    hit a transitional document with no <body> yet. domcontentloaded is
+    required to settle; networkidle is best-effort only (many JSP portals
+    poll/heartbeat continuously and never go fully idle, so a timeout there
+    is expected and harmless).
+    """
+    try:
+        b.page.wait_for_load_state("domcontentloaded", timeout=timeout)
+    except Exception:
+        pass
+    try:
+        b.page.wait_for_load_state("networkidle", timeout=min(timeout, 4000))
+    except Exception:
+        pass
+
+
+def _settle(b, timeout: int = 8000):
+    """
+    Wait for the page to actually finish loading/redirecting before reading
+    or clicking on it — click()/navigate() can return before a slow
+    multi-hop redirect chain finishes, which is what caused get_text() to
+    hit a transitional document with no <body> yet. domcontentloaded is
+    required to settle; networkidle is best-effort only (many JSP portals
+    poll/heartbeat continuously and never go fully idle, so a timeout there
+    is expected and harmless).
+    """
+    try:
+        b.page.wait_for_load_state("domcontentloaded", timeout=timeout)
+    except Exception:
+        pass
+    try:
+        b.page.wait_for_load_state("networkidle", timeout=min(timeout, 4000))
+    except Exception:
+        pass
+
+
+def _find_link_href(b, label: str) -> str | None:
+    """Look up the href for a link whose visible text matches `label`,
+    on whatever page is currently loaded. Only sees real <a href> tags —
+    see diagnose_contact_us_link() if this comes back None unexpectedly."""
+    label_norm = label.strip().lower()
+    for l in safe_links(b, limit=300):
+        if (l.get("text") or "").strip().lower() == label_norm:
+            return l.get("href")
+    for l in safe_links(b, limit=300):
+        if label_norm in (l.get("text") or "").strip().lower():
+            return l.get("href")
+    return None
+
+
+def _looks_like_pdf_bytes(data: bytes) -> bool:
+    """Check actual file content, not the URL — many JSP portals serve PDFs
+    from extensionless/servlet URLs (e.g. /ViewDoc.do?id=42)."""
+    return data[:5] == b"%PDF-"
+
+
+def _fetch_via_dedicated_context(b, url: str) -> bytes:
+    """
+    Fetches raw bytes via a STANDALONE Playwright request context that
+    explicitly ignores TLS/cert errors, independent of whatever
+    ignore_https_errors setting tools/browser.py's own context has (or
+    doesn't have, or has but isn't taking effect for some reason — stale
+    profile, corporate TLS-intercepting proxy, etc). This is the fix for
+    "self-signed certificate in certificate chain" errors that persist
+    even after editing browser.py.
+
+    Session cookies are carried over via storage_state() so the download
+    is still authenticated as the logged-in portal session.
+    """
+    state = b._ctx.storage_state()
+    req_ctx = b._pw.request.new_context(ignore_https_errors=True, storage_state=state)
+    try:
+        resp = req_ctx.get(url)
+        if not resp.ok:
+            raise RuntimeError(f"Fetching '{url}' failed: HTTP {resp.status}")
+        return resp.body()
+    finally:
+        req_ctx.dispose()
+
+
+def _download_pdf_bytes(b, url: str, out_path: Path) -> tuple[Path, bool]:
+    """
+    Fetches the actual PDF bytes (real text layer/tables intact for
+    pdfplumber — not a screenshot). Uses a dedicated request context (see
+    _fetch_via_dedicated_context) so self-signed/internal certs on the
+    portal don't need any change to tools/browser.py at all.
+    """
+    data = _fetch_via_dedicated_context(b, url)
+    is_pdf = _looks_like_pdf_bytes(data)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(data)
+    return out_path, is_pdf
+
+
+def diagnose_contact_us_link(b, label: str = None) -> None:
+    """
+    Run this manually (see README) when fetch_contact_pdf keeps failing,
+    to see what's actually on the page instead of guessing:
+
+        from navigator import open_browser, enter_portal, diagnose_contact_us_link
+        with open_browser() as b:
+            enter_portal(b)
+            diagnose_contact_us_link(b)
+    """
+    label = label or config.CONTACT_US_LABEL
+    print(f"Looking for label: '{label}'")
+    print("\n-- All <a href> links on this page (what _find_link_href sees) --")
+    for l in safe_links(b, limit=300):
+        print(f"  text={l.get('text')!r}  href={l.get('href')!r}")
+    print("\n-- Any element whose text contains a 'contact' substring "
+          "(catches buttons/spans/divs that links() would miss) --")
+    for hit in b.find("contact", limit=20):
+        print(f"  <{hit['tag']}> text={hit['text']!r}  at=({hit['x']},{hit['y']})")
+    print("\nIf the second list shows something links() didn't, CONTACT_US_LABEL "
+          "needs to be a CSS/XPath selector for that element (or its visible "
+          "text needs to match exactly) rather than plain link-text matching.")
+
+
+def fetch_contact_pdf(b, out_path: Path = None) -> Path:
+    """
+    Fetches a FRESH copy of the Contact-Us roster every run, so you don't
+    have to maintain a separate saved PDF/sheet by hand.
+
+    Order of attempts:
+      1. If "Contact Us" is a real <a href>, download those bytes directly
+         and verify by content (%PDF- magic bytes) — NOT by URL suffix,
+         since many JSP portals serve PDFs from extensionless servlet URLs.
+      2. If step 1's href turned out not to be a PDF (probably an HTML
+         page), or no href was found at all, click through — but first
+         confirm the label actually resolves to something on the page
+         (via find()) so a bad label fails fast with a clear message
+         instead of a blind 15s Playwright timeout.
+      3. On that resulting page, look for a real .pdf-content link and
+         download it the same way.
+      4. Last resort: screenshot-stitch via capture_page(). NOTE — this
+         produces an IMAGE-ONLY pdf; pdfplumber cannot extract text/tables
+         from it without OCR (not included).
+    """
+    out_path = out_path or config.CONTACT_LIST_PDF
+    tab_page_url = b.url()
+
+    href = _find_link_href(b, config.CONTACT_US_LABEL)
+
+    if href:
+        saved, is_pdf = _download_pdf_bytes(b, href, out_path)
+        if is_pdf:
+            print(f"  [OK] Contact roster fetched directly as PDF: {saved}")
+            return saved
+        print(f"  [WARN] href for '{config.CONTACT_US_LABEL}' ({href}) did not "
+              f"return actual PDF bytes — got something else. Falling through "
+              f"to click-and-look.")
+
+    # No usable href yet — confirm the label is even findable before
+    # spending 15s waiting on a click that may never resolve.
+    hits = b.find(config.CONTACT_US_LABEL, limit=5)
+    if not hits:
+        raise RuntimeError(
+            f"'{config.CONTACT_US_LABEL}' matched no href AND no visible text "
+            f"anywhere on the page — CONTACT_US_LABEL in config.py almost "
+            f"certainly doesn't match what's actually rendered. Run "
+            f"navigator.diagnose_contact_us_link(b) to see the real link text/"
+            f"selector and update config.py accordingly."
+        )
+
+    b.click(config.CONTACT_US_LABEL)
+    _settle(b)
+
+    sub_href = None
+    for l in safe_links(b, limit=300):
+        h = l.get("href") or ""
+        if _looks_like_pdf_url_hint(h):
+            sub_href = h
+            break
+
+    try:
+        if sub_href:
+            saved, is_pdf = _download_pdf_bytes(b, sub_href, out_path)
+            if is_pdf:
+                print(f"  [OK] Contact roster fetched directly as PDF: {saved}")
+            else:
+                print(f"  [WARN] Downloaded '{sub_href}' but it wasn't a real "
+                      f"PDF either — saved anyway to {saved} for inspection.")
+        else:
+            print("  [WARN] No .pdf-looking link found on the page after clicking "
+                  "Contact Us — falling back to screenshot capture. This produces "
+                  "an IMAGE-ONLY pdf: pdfplumber will NOT be able to extract text/"
+                  "tables from it without OCR.")
+            saved = b.capture_page(out_path)
+    finally:
+        b.navigate(tab_page_url)
+        _settle(b)
+
+    return saved
+
+
+def _looks_like_pdf_url_hint(url: str) -> bool:
+    """Loose pre-filter just to prioritize which link to try downloading
+    first when several are present — actual confirmation is by content,
+    via _looks_like_pdf_bytes, once downloaded."""
+    u = url.lower()
+    return ".pdf" in u or "pdf" in u.split("?")[0].split("/")[-1]
