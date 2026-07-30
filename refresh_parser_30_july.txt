@@ -1,0 +1,231 @@
+"""
+Turns raw scraped page text into structured refresh info:
+
+    Dashboard Title: "Leads for Acquiring Merchants"
+    Leads Published On: 08-07-2026   Lead Conversion As on: 25-07-2026   Data As On: 30-06-2026
+
+into
+
+    RefreshInfo(title="Leads for Acquiring Merchants",
+                fields={"Leads Published On": date(2026,7,8), ...})
+
+Two extraction paths:
+  - extract_refresh_info_regex()  — deterministic, no network calls, works today.
+  - extract_refresh_info_llm()    — calls the LLM to handle messy/inconsistent
+    phrasing across dashboards; only used when config.LLM_ENABLED is True.
+    Wired in but a no-op stub until you have API access.
+
+parse_page() picks whichever path is enabled and ALWAYS falls back to the
+regex parser if the LLM path errors or returns nothing usable, so a flaky
+LLM call never breaks the pipeline.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+import config
+
+_DATE_RE = r"(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})"
+_DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y")
+
+
+def _parse_date(s: str) -> date | None:
+    s = s.strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+@dataclass
+class RefreshInfo:
+    title: str | None = None
+    fields: dict[str, date | None] = field(default_factory=dict)
+    raw_fields: dict[str, str] = field(default_factory=dict)   # unparsed strings, for audit
+    source: str = "regex"       # "regex" or "llm"
+    warnings: list[str] = field(default_factory=list)
+
+
+def extract_refresh_info_regex(page_text: str) -> RefreshInfo:
+    info = RefreshInfo(source="regex")
+
+    m = re.search(rf'{re.escape(config.DASHBOARD_TITLE_MARKER)}\s*"?([^"\n]+?)"?\s*(?:\n|$)',
+                   page_text)
+    if m:
+        info.title = m.group(1).strip()
+    else:
+        for pattern in config.FALLBACK_TITLE_PATTERNS:
+            fm = re.search(pattern, page_text, flags=re.IGNORECASE)
+            if fm:
+                info.title = fm.group(1).strip()
+                break
+        if not info.title:
+            info.warnings.append("Dashboard title marker not found on page "
+                                  "(checked explicit marker and all fallback patterns).")
+
+    for marker in config.REFRESH_FIELD_MARKERS:
+        # Marker : <date> — tolerant of extra whitespace/tabs between fields
+        pattern = rf'{re.escape(marker)}\s*:?\s*{_DATE_RE}'
+        fm = re.search(pattern, page_text, flags=re.IGNORECASE)
+        if fm:
+            raw = fm.group(1)
+            info.raw_fields[marker] = raw
+            parsed = _parse_date(raw)
+            info.fields[marker] = parsed
+            if parsed is None:
+                info.warnings.append(f"Could not parse date '{raw}' for '{marker}'.")
+        else:
+            info.fields[marker] = None
+            info.warnings.append(f"Field '{marker}' not found on page.")
+
+    return info
+
+
+# ── LLM path (stub) ───────────────────────────────────────────────────────
+
+_LLM_PROMPT_TEMPLATE = """You are extracting structured refresh metadata from a dashboard status page.
+
+Page text:
+---
+{page_text}
+---
+
+Return ONLY a JSON object, no prose, no markdown fences, matching exactly:
+{{
+  "title": "<dashboard title, or null>",
+  "fields": {{
+{field_lines}
+  }}
+}}
+
+Dates must stay in the same format they appear in the source text. If a
+field is genuinely absent from the text, use null for it. Do not invent
+values.
+"""
+
+
+def _build_llm_prompt(page_text: str) -> str:
+    field_lines = ",\n".join(f'    "{f}": "<value or null>"' for f in config.REFRESH_FIELD_MARKERS)
+    return _LLM_PROMPT_TEMPLATE.format(page_text=page_text[:12000], field_lines=field_lines)
+
+
+def _call_llm(prompt: str) -> str:
+    """
+    Placeholder for the actual LLM call. Swap this out for a real
+    `anthropic` client call once you have API access, e.g.:
+
+        import anthropic
+        client = anthropic.Anthropic()
+        resp = client.messages.create(
+            model=config.LLM_MODEL,
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text
+
+    Left unimplemented on purpose so a misconfigured run fails loudly
+    instead of silently returning fake data.
+    """
+    raise NotImplementedError("LLM client not wired up yet — set config.LLM_ENABLED "
+                              "only once you've implemented _call_llm().")
+
+
+def extract_refresh_info_llm(page_text: str) -> RefreshInfo:
+    prompt = _build_llm_prompt(page_text)
+    raw = _call_llm(prompt)
+    cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    data = json.loads(cleaned)
+
+    info = RefreshInfo(source="llm")
+    info.title = data.get("title")
+    for marker in config.REFRESH_FIELD_MARKERS:
+        raw_val = (data.get("fields") or {}).get(marker)
+        info.raw_fields[marker] = raw_val or ""
+        info.fields[marker] = _parse_date(raw_val) if raw_val else None
+        if raw_val and info.fields[marker] is None:
+            info.warnings.append(f"LLM returned unparseable date '{raw_val}' for '{marker}'.")
+    return info
+
+
+# ── Generic keyword fallback (additive) ───────────────────────────────────
+#
+# The strict markers above require exact label text ("Leads Published On:",
+# etc.) and work well when present — but some pages express the same idea
+# in free-form text (e.g. "launched on 10-07-2026, dashboard for retail
+# segment b"). This pass lowercases the page and looks for a broader
+# keyword family, pulling whatever date sits near each hit. It NEVER
+# overrides a strict match — it only fills in extra fields the strict pass
+# didn't find, so a page that already parsed cleanly is unaffected.
+
+_GENERIC_DASHBOARD_KEYWORDS = ("dashboard",)
+_GENERIC_DATE_KEYWORDS = ("launched", "launch", "published", "data as on", "as on", "refreshed", "refresh")
+_GENERIC_DATE_WINDOW_CHARS = 40  # how far past a keyword to look for a date
+
+
+def extract_refresh_info_generic(page_text: str) -> RefreshInfo:
+    """
+    Broader fallback for pages that mention a dashboard/date in free-form
+    text rather than using the exact strict markers. Requires the word
+    "dashboard" to appear SOMEWHERE on the page (not just any date/keyword
+    match) to avoid false positives on unrelated pages that happen to
+    contain a date near the word "launch"/"refresh" for other reasons.
+    """
+    info = RefreshInfo(source="generic")
+    lower_text = page_text.lower()
+
+    if not any(k in lower_text for k in _GENERIC_DASHBOARD_KEYWORDS):
+        return info  # no mention of "dashboard" at all — not our concern
+
+    seen_dates = set()
+    for keyword in _GENERIC_DATE_KEYWORDS:
+        for m in re.finditer(re.escape(keyword), lower_text):
+            window = page_text[m.end(): m.end() + _GENERIC_DATE_WINDOW_CHARS]
+            dm = re.search(_DATE_RE, window)
+            if not dm:
+                continue
+            raw = dm.group(1)
+            parsed = _parse_date(raw)
+            if parsed is None or raw in seen_dates:
+                continue
+            seen_dates.add(raw)
+            field_name = f"Generic:{keyword}"
+            info.fields[field_name] = parsed
+            info.raw_fields[field_name] = raw
+
+    return info
+
+
+def parse_page(page_text: str) -> RefreshInfo:
+    """Single entry point the navigator should call."""
+    if config.LLM_ENABLED:
+        try:
+            info = extract_refresh_info_llm(page_text)
+            if not (info.title or any(info.fields.values())):
+                raise ValueError("LLM returned nothing usable")
+        except Exception as e:
+            # Any LLM failure (not implemented, network, bad JSON) — fall
+            # back to regex rather than losing the row entirely.
+            info = extract_refresh_info_regex(page_text)
+            info.warnings.append(f"LLM extraction failed ({e}); used regex fallback.")
+    else:
+        info = extract_refresh_info_regex(page_text)
+
+    # Additive generic pass — fills in extra fields the strict/LLM pass
+    # didn't find (e.g. free-form "launched on <date>, dashboard for X"
+    # text), never overriding anything already found.
+    generic = extract_refresh_info_generic(page_text)
+    for k, v in generic.fields.items():
+        info.fields.setdefault(k, v)
+    for k, v in generic.raw_fields.items():
+        info.raw_fields.setdefault(k, v)
+    if not info.title and generic.fields and info.source != "generic":
+        info.warnings.append("No strict title/marker found, but generic "
+                              "dashboard/date keywords matched — see Generic:* fields.")
+
+    return info

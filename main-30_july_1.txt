@@ -1,0 +1,179 @@
+"""
+Entry point.
+
+Normal run (needs the real portal + Playwright/Chrome):
+    python main.py
+
+Test everything EXCEPT the live portal (mapping sheet parsing, contact PDF
+parsing, refresh-date regex parsing, report generation, mail-plan dry run)
+using synthetic scrape data:
+    python main.py --mock
+
+Once you have LLM access, flip config.LLM_ENABLED = True and implement
+mailer._call_llm in refresh_parser.py — nothing else needs to change.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import date
+
+import config
+import mapping_loader
+import report_builder
+import refresh_parser
+from navigator import DashboardScrapeResult
+
+
+def _log(event: str, **fields):
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {"event": event, **fields}
+    with open(config.LOG_JSONL, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+
+def _mock_scrapes() -> list[DashboardScrapeResult]:
+    """Synthetic stand-in for navigator.scrape_all_dashboards(), so the
+    mapping/parsing/report/mailer portions can be exercised without Chrome
+    or portal access."""
+    sample_text = (
+        'Dashboard Title: "Leads for Acquiring Merchants"\n'
+        'Leads Published On: 08-07-2026   Lead Conversion As on: 25-07-2026   '
+        'Data As On: 30-06-2026\n'
+        'Dashboard Owner: Priya Shah\n'
+        'Team Lead: Arvind Rao\n'
+        'Contact: priya.shah@abc.xyz.in, 9876543210\n'
+    )
+    return [
+        DashboardScrapeResult(
+            label="Leads for Acquiring Merchants",
+            url="https://abc.xyz.in/dashboards/leads-acquiring",
+            page_text=sample_text,
+            owner_name="Priya Shah",
+            team_lead_name="Arvind Rao",
+            emails_found=["priya.shah@abc.xyz.in"],
+            phones_found=["9876543210"],
+        ),
+        DashboardScrapeResult(
+            label="Merchant Attrition Model",
+            url="https://abc.xyz.in/dashboards/others/attrition",
+            page_text='Dashboard Title: "Merchant Attrition Model"\n'
+                      'Leads Published On: 01-06-2026   Data As On: 01-06-2026\n',
+            depth=1, parent_label="Others",
+        ),
+    ]
+
+
+def run(mock: bool = False):
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("[1/5] Loading team/subject mapping sheet...")
+    if config.USE_TEAM_MAPPING:
+        mappings = mapping_loader.load_team_mapping(config.TEAM_MAPPING_XLSX)
+        print(f"       {len(mappings)} mapping row(s) loaded.")
+    else:
+        mappings = []
+        print("       [PARKED] config.USE_TEAM_MAPPING is False — skipping the "
+              "mapping sheet entirely for now (Team/Subject/Owner columns in the "
+              "report will be blank; set it True later to re-enable).")
+
+    print("[2/5] Collecting dashboard pages + contact roster...")
+    if mock:
+        scrapes = _mock_scrapes()
+        print(f"       [MOCK MODE] {len(scrapes)} synthetic dashboard(s) — no browser used.")
+        # No live session in mock mode — reuse whatever was cached from a
+        # previous real run, if any, so the mapping/report logic can still
+        # be exercised end to end.
+        try:
+            roster = mapping_loader.load_contact_roster(config.CONTACT_LIST_PDF)
+            print(f"       {len(roster)} contact(s) loaded from cached copy "
+                  f"({config.CONTACT_LIST_PDF}).")
+        except FileNotFoundError:
+            print(f"       [INFO] No cached roster at {config.CONTACT_LIST_PDF} yet "
+                  f"(only produced by a real run) — continuing with an empty roster.")
+            roster = []
+    else:
+        from navigator import open_browser, enter_portal, scrape_all_dashboards, fetch_contact_pdf
+        with open_browser() as b:
+            enter_portal(b)
+
+            roster = []
+            if config.FETCH_CONTACT_PDF_LIVE:
+                try:
+                    pdf_path = fetch_contact_pdf(b)
+                    roster = mapping_loader.load_contact_roster(pdf_path)
+                    print(f"       {len(roster)} contact(s) parsed from live-fetched PDF.")
+                    if not roster:
+                        print("       [WARN] Roster PDF fetched but 0 contacts parsed — "
+                              "likely an image-only PDF (see warning above) or an "
+                              "unexpected layout. Check the cached file at "
+                              f"{pdf_path} and adjust mapping_loader._parse_table / "
+                              "_parse_text_fallback to match its actual structure.")
+                except Exception as e:
+                    print(f"       [WARN] Live contact-roster fetch failed: {e}. "
+                          f"Continuing with an empty roster.")
+
+            scrapes = scrape_all_dashboards(b)
+    print(f"       {len(scrapes)} dashboard page(s) collected, "
+          f"{len(roster)} contact(s) in roster.")
+
+    print("[3/5] Parsing refresh info per dashboard...")
+    refresh_infos = {}
+    for s in scrapes:
+        info = refresh_parser.parse_page(s.page_text)
+        if not info.title:
+            # No explicit on-page title (marker or fallback pattern) found —
+            # use the label of the tab/tile that was clicked to reach this
+            # dashboard as the title instead, per your requirement.
+            info.title = s.label
+        refresh_infos[s.label] = info
+        _log("dashboard_parsed", label=s.label, url=s.url, title=info.title,
+             fields={k: str(v) for k, v in info.fields.items()}, source=info.source,
+             warnings=info.warnings)
+
+    print("[4/5] Reconciling against mapping sheet...")
+    if config.USE_TEAM_MAPPING:
+        reconciliation = mapping_loader.reconcile_dashboard_coverage(
+            mappings, [s.label for s in scrapes])
+        if reconciliation["missing_from_portal"]:
+            print(f"       [NOTE] {len(reconciliation['missing_from_portal'])} mapped "
+                  f"dashboard(s) not seen on the portal this run.")
+        if reconciliation["missing_from_mapping"]:
+            print(f"       [NOTE] {len(reconciliation['missing_from_mapping'])} portal "
+                  f"dashboard(s) have no mapping-sheet entry.")
+    else:
+        reconciliation = {"missing_from_portal": [], "missing_from_mapping": []}
+        print("       [PARKED] config.USE_TEAM_MAPPING is False — skipping "
+              "reconciliation (Mapping Reconciliation sheet in the report will be empty).")
+
+    print("[5/5] Writing report...")
+    out_path = report_builder.write_report(
+        scrapes, refresh_infos, mappings, roster, reconciliation)
+    print(f"       Report written: {out_path.resolve()}")
+
+    # ── Mail step (parked) ────────────────────────────────────────────────
+    rows = report_builder.build_rows(scrapes, refresh_infos, mappings, roster)
+    from mailer import build_mail_plan, send_mails
+    tasks = build_mail_plan(rows, report_builder.COLUMNS)
+    send_mails(tasks, dry_run=config.MAIL_DRY_RUN)
+
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Dashboard refresh reconciliation")
+    ap.add_argument("--mock", action="store_true",
+                     help="Skip the live portal and use synthetic scrape data "
+                          "(for testing mapping/parsing/report/mail-plan only).")
+    args = ap.parse_args()
+    try:
+        run(mock=args.mock)
+    except Exception as e:
+        print(f"[FATAL] {e}", file=sys.stderr)
+        raise
+
+
+if __name__ == "__main__":
+    main()

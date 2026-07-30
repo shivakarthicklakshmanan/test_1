@@ -1,0 +1,123 @@
+"""
+Central configuration for the dashboard-refresh reconciliation tool.
+Edit the values below to match your environment. Nothing here talks to
+the network by itself — it's just constants.
+"""
+
+from pathlib import Path
+
+# ── Portal ────────────────────────────────────────────────────────────────
+PORTAL_HOME_URL = "https://abc.xyz.in"        # landing page with the Confirm button
+PORTAL_CHANNEL = "chrome"                     # passed straight to AirgapBrowser
+PORTAL_PROFILE = None                         # set e.g. "abc_portal" to persist cookies/login
+ALLOW_ANY_HOST = False                        # True only if abc.xyz.in isn't in your allowlist yet
+
+# Text/selector used to find the button on the landing page that takes you
+# to the tab-listing page. AirgapBrowser.click() accepts either a CSS/XPath
+# selector or plain visible text (falls back to get_by_text — which does
+# NOT care about tag, so if the same text appears on both an <input> and a
+# <div>, plain text is ambiguous and may click the wrong one). Prefer a
+# selector when there's any such ambiguity, e.g.:
+#     CONFIRM_BUTTON_TARGET = "input[value='Confirm']"
+#     CONFIRM_BUTTON_TARGET = "input[type='submit'][value='Confirm']"
+#     CONFIRM_BUTTON_TARGET = "#someActualId"   # if read_page() shows one
+CONFIRM_BUTTON_TARGET = "input[value='Confirm']"
+
+# ── Navigation labels ────────────────────────────────────────────────────
+# Links on the tab page that are chrome/navigation, not dashboards, and
+# must be skipped when we walk the tab list looking for dashboards.
+NON_DASHBOARD_LABELS = {
+    "home", "about us", "access management", "hits", "journal", "contact us",
+}
+
+# Label(s) that indicate a tab which itself expands into further sub-links
+# (the "Others" case). Matched case-insensitively, substring match.
+DRILL_DOWN_LABELS = {"others", "other", "more"}
+
+# Contact Us is expected to open/point at a PDF with the full team roster.
+CONTACT_US_LABEL = "contact us"
+
+# How many levels deep to follow "Others"-style sub menus before giving up.
+MAX_DRILL_DEPTH = 3
+
+# Some dashboards take a long time to render (observed ~49s on this portal).
+# _settle() uses this timeout specifically after clicking a dashboard tab
+# (covers "Others" too, since it goes through the same click). The default
+# _settle() timeout elsewhere (Confirm, Contact Us, back()) stays short —
+# bump those individually in navigator.py if they turn out to need it too.
+DASHBOARD_LOAD_TIMEOUT_MS = 75_000
+
+# Hard numeric safety net for the blind-dump walk (scrape_all_dashboards).
+# visited_urls + MAX_DRILL_DEPTH already prevent a true infinite loop, but
+# if the portal appends a session token/timestamp to URLs, the *same*
+# logical page can look like a *different* URL every visit, defeating that
+# check. This caps total pages visited across the whole run regardless,
+# so a run always terminates in practice, not just in theory.
+MAX_TOTAL_PAGES_VISITED = 200
+
+# ── Page text markers we search for on each dashboard's own page ────────
+DASHBOARD_TITLE_MARKER = "Dashboard Title:"
+
+# Not every dashboard uses the "Dashboard Title:" label — some show a bare
+# technical heading instead, e.g. "Model_Overview-Foreign Travel Card".
+# Tried in order (first match wins) only if DASHBOARD_TITLE_MARKER isn't
+# found. Each pattern's first capture group becomes the title. Add more
+# entries here as you discover other naming conventions on the portal.
+FALLBACK_TITLE_PATTERNS = [
+    r'Model[_ ]?Overview\s*[-:]\s*([^\n]+)',
+]
+
+REFRESH_FIELD_MARKERS = [
+    "Leads Published On",
+    "Lead Conversion As on",
+    "Data As On",
+]
+# Loosen/extend this list per-portal if other dashboards use different
+# field names (e.g. "Report Refreshed On", "As of Date", etc).
+
+# ── LLM toggle ────────────────────────────────────────────────────────────
+# Flip this to True once you have API access. Until then every extraction
+# falls back to the deterministic regex parser in refresh_parser.py, so the
+# rest of the pipeline (navigation, mapping, report, mailer stub) is fully
+# testable without it.
+LLM_ENABLED = False
+LLM_MODEL = "claude-sonnet-4-6"
+
+# ── Input files (yours) ──────────────────────────────────────────────────
+INPUT_DIR = Path("./input")
+# Parked for now — set True once the mapping sheet's naming lines up with
+# the portal's real dynamic labels and you're ready to reconcile against
+# it. All the mapping_loader.py code stays as-is; this just skips calling
+# it from main.py while it's False (no need to even have the xlsx file
+# present while parked).
+USE_TEAM_MAPPING = False
+
+TEAM_MAPPING_XLSX = INPUT_DIR / "team_subject_mapping.xlsx"   # subject/team/dashboard mapping — kept manual, this is your source of truth
+
+# Contact roster is now fetched LIVE off the portal's "Contact Us" link each
+# run (see navigator.fetch_contact_pdf) instead of you maintaining a copy.
+# CONTACT_LIST_PDF is just where the freshly-fetched copy gets cached each
+# run (handy for --mock testing and for an audit trail of what was parsed).
+FETCH_CONTACT_PDF_LIVE = True
+CONTACT_LIST_PDF = Path("./output") / "contact_us_team_members_latest.pdf"
+
+# ── Output ────────────────────────────────────────────────────────────────
+OUTPUT_DIR = Path("./output")
+REPORT_XLSX = OUTPUT_DIR / "dashboard_refresh_status_report.xlsx"
+EVIDENCE_DIR = OUTPUT_DIR / "evidence"          # per-dashboard screenshot/pdf capture
+LOG_JSONL = OUTPUT_DIR / "run_log.jsonl"
+
+# ── Reconciliation thresholds (edit to your SLA) ─────────────────────────
+# Used to decide "On-Time" vs "Delayed" vs "Stale" when we know the expected
+# refresh cadence from the mapping sheet (column: expected_frequency_days).
+DEFAULT_EXPECTED_FREQUENCY_DAYS = 7
+DELAY_GRACE_DAYS = 2  # allowed slack beyond expected frequency before "Delayed"
+STALE_AFTER_DAYS = 30  # beyond this with no matching refresh => "Stale"
+
+# ── Mailer (parked) ───────────────────────────────────────────────────────
+MAIL_ENABLED = False          # keep False until you're ready to test this part
+MAIL_DRY_RUN = True           # when MAIL_ENABLED=True, this still won't send, just logs
+SMTP_HOST = "smtp.abc.xyz.in"
+SMTP_PORT = 587
+SMTP_USE_TLS = True
+MAIL_FROM = "dashboard-monitor@abc.xyz.in"
