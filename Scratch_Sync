@@ -30,3 +30,20 @@ results = scrape_dashboard(b, "ABU", href=abu_href)
 print(len(results), "result(s) from ABU:")
 for r in results:
     print(r.label, '|', r.url)
+
+print(b.url())   # confirm you're on the Business Leads sub-tabs page
+
+raw = b.links()
+print(len(raw), "raw link(s):")
+for l in raw:
+    print(repr(l['text']), '|', l.get('href'))
+
+abu_href = next(l['href'] for l in raw if l['text'].strip().upper() == 'ABU')
+b.navigate(abu_href)
+from navigator import _settle
+_settle(b)
+b.url()
+
+from navigator import describe_dropdowns
+describe_dropdowns(b)
+
