@@ -1,7 +1,6 @@
-# test_pw.py
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch()
-    print("Launched fine:", browser)
-    browser.close()
+Traceback (most recent call last):
+  File "<console>", line 1, in <module>
+  File "D:\Tank\let\2026\AI\Initial\Lib\site-packages\playwright\sync_api\_context_manager.py", line 47, in __enter__
+    raise Error(
+playwright._impl._errors.Error: It looks like you are using Playwright Sync API inside the asyncio loop.
+Please use the Async API instead.
