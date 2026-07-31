@@ -155,3 +155,7 @@ raw4 = b.page.evaluate("""() => {
 }""")
 for r in raw4:
     print(r)
+
+
+{'tag': 'A', 'text': 'MUDRA LEADS', 'href': 'xxxxxxxxxxxxxx', 'onclick': None, 'chain': [{'tag': 'A', 'id': None, 'cls': None}, {'tag': 'DIV', 'id': None, 'cls': 'dropdown-content2'}, {'ta
+g': 'DIV', 'id': None, 'cls': 'dropdown'}, {'tag': 'DIV', 'id': None, 'cls': 'col-md-4'}, {'tag': 'DIV', 'id': None, 'cls': 'row'}, {'tag': 'DIV', 'id': None, 'cls': 'container-fluid'}]}
