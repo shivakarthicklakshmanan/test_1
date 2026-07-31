@@ -1,11 +1,26 @@
-[INFO] Visiting: CUSTOMER (CIF) BASED COMPREHENSIVE BUSINESS LEADS
-  [INFO] Visiting: BUSINESS LEADS
-  [INFO] href-selector click failed for 'BUSINESS LEADS' (Locator.click: Timeout 15000ms exceeded.
-Call log:tics.tegankmimes.st/tics_web/r_main_bu_LEADS.jsp\"]")
-) — falling back to direct navigation to tics.tegankmimes.st/tics_web/r_main_bu_LEADS.jsp.
-  [INFO] 'BUSINESS LEADS' has no dashboard content but 11 further link(s) — drilling in (depth 1).
-  [INFO] href-selector click failed for 'RETAIL LOANS' (Locator.click: Timeout 15000ms exceeded.
-Call log:
-  - waiting for locator("a[href=\"tics.tegankmimes.st/tics_web/r_pbbu_LEADS.jsp\"]")
-) — falling back to direct navigation to tics.tegankmimes.st/tics_web/r_pbbu_LEADS.jsp.
-  [INFO] 'RETAIL LOANS' has no dashboard content and no further links — skipping (likely a nav/info page, e.g. What's New/Search).
+import code
+import config
+#from navigator import open_browser, enter_portal, diagnose_contact_us_link
+from navigator import open_browser, enter_portal, diagnose_contact_us_link, describe_dropdowns, scrape_dashboard, list_dashboard_tabs
+
+
+def main():
+    print("Opening browser (headed) and clicking Confirm...")
+    with open_browser(headed=True) as b:
+        enter_portal(b)
+        print(f"\nLanded on: {b.url()}")
+        print("You're now at an interactive prompt with `b` bound to the "
+              "live browser. Try b.get_text(), b.links(), b.find('contact'), "
+              "b.screenshot('look.png'), b.click('...'), b.back(), etc.\n"
+              "Ctrl-D / exit() to close the browser and quit.\n")
+
+        local_vars = {
+            "b": b,
+            "config": config,
+            "diagnose_contact_us_link": lambda label=None: diagnose_contact_us_link(b, label),
+        }
+        code.interact(banner="", local=local_vars)
+
+
+if __name__ == "__main__":
+    main()
