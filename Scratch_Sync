@@ -159,3 +159,11 @@ for r in raw4:
 
 {'tag': 'A', 'text': 'MUDRA LEADS', 'href': 'xxxxxxxxxxxxxx', 'onclick': None, 'chain': [{'tag': 'A', 'id': None, 'cls': None}, {'tag': 'DIV', 'id': None, 'cls': 'dropdown-content2'}, {'ta
 g': 'DIV', 'id': None, 'cls': 'dropdown'}, {'tag': 'DIV', 'id': None, 'cls': 'col-md-4'}, {'tag': 'DIV', 'id': None, 'cls': 'row'}, {'tag': 'DIV', 'id': None, 'cls': 'container-fluid'}]}
+
+
+
+from navigator import list_dashboard_tabs
+tabs = list_dashboard_tabs(b, depth=1)
+print(len(tabs), "tabs found")
+for t in tabs:
+    print(t['text'], '|', t.get('href'))
