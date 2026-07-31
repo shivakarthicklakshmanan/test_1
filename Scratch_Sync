@@ -127,3 +127,31 @@ raw3 = b.page.evaluate("""() => {
 for r in raw3:
     print(r)
 
+
+raw4 = b.page.evaluate("""() => {
+    const all = Array.from(document.querySelectorAll('*'));
+    const matches = all.filter(el => {
+        const text = (el.innerText || el.textContent || '').trim();
+        return text === 'MUDRA LEADS' || text.includes('MUDRA LEADS');
+    });
+    const leafMatches = matches.filter(el =>
+        el.children.length === 0 ||
+        Array.from(el.children).every(c => !matches.includes(c)));
+    return leafMatches.slice(0, 5).map(el => {
+        const chain = [];
+        let node = el;
+        for (let i = 0; i < 6 && node; i++) {
+            chain.push({tag: node.tagName, id: node.id || null, cls: node.className || null});
+            node = node.parentElement;
+        }
+        return {
+            tag: el.tagName,
+            text: (el.innerText || el.textContent || '').trim(),
+            href: el.getAttribute ? el.getAttribute('href') : null,
+            onclick: el.getAttribute ? el.getAttribute('onclick') : null,
+            chain: chain
+        };
+    });
+}""")
+for r in raw4:
+    print(r)
