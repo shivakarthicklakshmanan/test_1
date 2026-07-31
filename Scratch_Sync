@@ -107,3 +107,23 @@ raw2 = b.page.evaluate("""() => {
 }""")
 for r in raw2:
     print(r)
+
+
+raw3 = b.page.evaluate("""() => {
+    const btns = Array.from(document.querySelectorAll('button.dropbtn'))
+        .filter(el => (el.innerText || '').includes('Select ABU'));
+    return btns.map(btn => {
+        const dropdown = btn.closest('.dropdown');
+        if (!dropdown) return {found: false, reason: 'no .dropdown ancestor around this button'};
+        const content = dropdown.querySelector('.dropdown-content');
+        if (!content) return {found: false, reason: 'no .dropdown-content inside this specific .dropdown'};
+        const items = Array.from(content.querySelectorAll('a')).map(a => ({
+            text: (a.innerText || a.textContent || '').trim(),
+            href: a.getAttribute('href'),
+        }));
+        return {found: true, itemCount: items.length, items: items};
+    });
+}""")
+for r in raw3:
+    print(r)
+
