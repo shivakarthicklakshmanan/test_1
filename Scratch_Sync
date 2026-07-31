@@ -1,6 +1,32 @@
-Traceback (most recent call last):
-  File "<console>", line 1, in <module>
-  File "D:\Tank\let\2026\AI\Initial\Lib\site-packages\playwright\sync_api\_context_manager.py", line 47, in __enter__
-    raise Error(
-playwright._impl._errors.Error: It looks like you are using Playwright Sync API inside the asyncio loop.
-Please use the Async API instead.
+# 1. Get to Business Leads (page 1 -> page 2)
+from navigator import list_dashboard_tabs, describe_link_containers, describe_dropdowns, scrape_dashboard, _settle
+
+tabs = list_dashboard_tabs(b)
+bl_href = next(t['href'] for t in tabs if 'BUSINESS LEADS' in t['text'].upper())
+b.navigate(bl_href)
+_settle(b)
+b.url()   # confirm you're on the Business Leads sub-tabs page
+
+# 2. Check the suspected gap: does list_dashboard_tabs() see anything here at all?
+tabs2 = list_dashboard_tabs(b)
+print(len(tabs2), "tabs found via list_dashboard_tabs()")
+for t in tabs2:
+    print(t['text'], '|', t.get('href'))
+
+print(b.links())   # raw, unfiltered — find "ABU" and its href here instead
+
+# 3. Navigate to ABU directly via its href (however you found it above)
+b.navigate(abu_href)
+_settle(b)
+b.url()
+
+# 4. NOW test the actual dropdown fix
+describe_dropdowns(b)
+
+# 5. Also test the real walker logic end-to-end, not just the diagnostic
+b.navigate(bl_href)   # back to Business Leads
+_settle(b)
+results = scrape_dashboard(b, "ABU", href=abu_href)
+print(len(results), "result(s) from ABU:")
+for r in results:
+    print(r.label, '|', r.url)
