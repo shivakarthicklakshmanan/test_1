@@ -47,3 +47,16 @@ b.url()
 from navigator import describe_dropdowns
 describe_dropdowns(b)
 
+
+>>> from navigator import describe_dropdowns
+>>> describe_dropdowns(b)
+-- No collapsed caret/chevron-style trigger found to expand (the panel may already be open, or use a different toggle signal than ▾/▼/⌄/˅/⏷ or a caret/chevron/dropdown-toggle class name) --
+
+-- <select> elements on this page: 0 --
+  (none — if a dropdown is visible on screen, it's a styled container rather than a native <select>; check the 'onclick' items below, or describe_link_containers() if its entries turn out to be ordinary <a href> links inside a hidden d
+iv.)
+
+-- What _dropdown_items() would return: 1 item(s) (DROPDOWN_MIN_OPTIONS=2) --
+  kind=onclick  text='Back'
+      control='html > body > div:nth-of-type(1) > button'  value=None
+
