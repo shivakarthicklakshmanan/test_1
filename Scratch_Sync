@@ -1,4 +1,4 @@
-# 1. Get to Business Leads (page 1 -> page 2)
+9# 1. Get to Business Leads (page 1 -> page 2)
 from navigator import list_dashboard_tabs, describe_link_containers, describe_dropdowns, scrape_dashboard, _settle
 
 tabs = list_dashboard_tabs(b)
@@ -91,3 +91,19 @@ for r in raw:
 {'tag': 'DIV', 'id': None, 'class': 'col-md-4', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'auto', 'afterContent': 'none', 'beforeContent': 'none'}
 {'tag': 'DIV', 'id': None, 'class': 'dropdown', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'auto', 'afterContent': 'none', 'beforeContent': 'none'}
 {'tag': 'BUTTON', 'id': None, 'class': 'dropbtn', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'pointer', 'afterContent': 'none', 'beforeContent': 'none'}
+
+
+raw2 = b.page.evaluate("""() => {
+    const dropdowns = Array.from(document.querySelectorAll('.dropdown'));
+    return dropdowns.map(d => {
+        const content = d.querySelector('.dropdown-content');
+        if (!content) return {found: false};
+        const items = Array.from(content.querySelectorAll('a')).map(a => ({
+            text: (a.innerText || a.textContent || '').trim(),
+            href: a.getAttribute('href'),
+        }));
+        return {found: true, itemCount: items.length, items: items};
+    });
+}""")
+for r in raw2:
+    print(r)
