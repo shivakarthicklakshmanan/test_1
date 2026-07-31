@@ -83,3 +83,11 @@ raw = b.page.evaluate("""() => {
 }""")
 for r in raw:
     print(r)
+
+
+{'tag': 'DIV', 'id': None, 'class': 'container-fluid', 'text': 'Select ABU Dashboards \n\n\n\n\nCopyright XXXXXXXXXX \xa0 | \xa0 XXXXXXXXXX \xa0 | \xa0 Developed by XXXXXXXXXXXX, YYYY', 'ariaExpanded': None,
+ 'onclick_attr': None, 'cursor': 'auto', 'afterContent': '" "', 'beforeContent': '" "'}
+{'tag': 'DIV', 'id': None, 'class': 'row', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'auto', 'afterContent': '" "', 'beforeContent': '" "'}
+{'tag': 'DIV', 'id': None, 'class': 'col-md-4', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'auto', 'afterContent': 'none', 'beforeContent': 'none'}
+{'tag': 'DIV', 'id': None, 'class': 'dropdown', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'auto', 'afterContent': 'none', 'beforeContent': 'none'}
+{'tag': 'BUTTON', 'id': None, 'class': 'dropbtn', 'text': 'Select ABU Dashboards', 'ariaExpanded': None, 'onclick_attr': None, 'cursor': 'pointer', 'afterContent': 'none', 'beforeContent': 'none'}
