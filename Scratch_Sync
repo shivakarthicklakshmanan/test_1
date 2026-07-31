@@ -1,7 +1,12 @@
 import code
 import config
-#from navigator import open_browser, enter_portal, diagnose_contact_us_link
-from navigator import open_browser, enter_portal, diagnose_contact_us_link, describe_dropdowns, scrape_dashboard, list_dashboard_tabs
+from navigator import (
+    open_browser,
+    enter_portal,
+    diagnose_contact_us_link,
+    describe_link_containers,
+    describe_dropdowns,
+)
 
 
 def main():
@@ -12,12 +17,21 @@ def main():
         print("You're now at an interactive prompt with `b` bound to the "
               "live browser. Try b.get_text(), b.links(), b.find('contact'), "
               "b.screenshot('look.png'), b.click('...'), b.back(), etc.\n"
+              "For the dropdown-discovery fix, navigate to the page in "
+              "question (e.g. b.click(\"ABU\")) then run "
+              "describe_dropdowns(b) to see which DOM shape it is (native "
+              "<select> vs anchor-bearing container), the options found, "
+              "and the control selector that will be used.\n"
+              "describe_link_containers(b) still works as before for the "
+              "existing tile/header discovery paths.\n"
               "Ctrl-D / exit() to close the browser and quit.\n")
 
         local_vars = {
             "b": b,
             "config": config,
             "diagnose_contact_us_link": lambda label=None: diagnose_contact_us_link(b, label),
+            "describe_link_containers": lambda limit=80: describe_link_containers(b, limit),
+            "describe_dropdowns": lambda: describe_dropdowns(b),
         }
         code.interact(banner="", local=local_vars)
 
