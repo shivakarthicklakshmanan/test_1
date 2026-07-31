@@ -1,40 +1,7 @@
-import code
-import config
-from navigator import (
-    open_browser,
-    enter_portal,
-    diagnose_contact_us_link,
-    describe_link_containers,
-    describe_dropdowns,
-)
+# test_pw.py
+from playwright.sync_api import sync_playwright
 
-
-def main():
-    print("Opening browser (headed) and clicking Confirm...")
-    with open_browser(headed=True) as b:
-        enter_portal(b)
-        print(f"\nLanded on: {b.url()}")
-        print("You're now at an interactive prompt with `b` bound to the "
-              "live browser. Try b.get_text(), b.links(), b.find('contact'), "
-              "b.screenshot('look.png'), b.click('...'), b.back(), etc.\n"
-              "For the dropdown-discovery fix, navigate to the page in "
-              "question (e.g. b.click(\"ABU\")) then run "
-              "describe_dropdowns(b) to see which DOM shape it is (native "
-              "<select> vs anchor-bearing container), the options found, "
-              "and the control selector that will be used.\n"
-              "describe_link_containers(b) still works as before for the "
-              "existing tile/header discovery paths.\n"
-              "Ctrl-D / exit() to close the browser and quit.\n")
-
-        local_vars = {
-            "b": b,
-            "config": config,
-            "diagnose_contact_us_link": lambda label=None: diagnose_contact_us_link(b, label),
-            "describe_link_containers": lambda limit=80: describe_link_containers(b, limit),
-            "describe_dropdowns": lambda: describe_dropdowns(b),
-        }
-        code.interact(banner="", local=local_vars)
-
-
-if __name__ == "__main__":
-    main()
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    print("Launched fine:", browser)
+    browser.close()
